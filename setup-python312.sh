@@ -44,9 +44,9 @@ fi
 
 log "installing Python 3.12 via uv"
 if [[ "$FORCE" -eq 1 ]]; then
-  uv python install 3.12 --reinstall
+  uv python install 3.12 --reinstall --default
 else
-  uv python install 3.12
+  uv python install 3.12 --default
 fi
 
 if ! command -v python3.12 >/dev/null 2>&1; then

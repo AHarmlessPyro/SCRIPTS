@@ -29,6 +29,120 @@ path_prepend_if_missing() {
   fi
 }
 
+cleanup_path() {
+  # Remove duplicates and keep only the most recent fnm multishell path.
+  # Note: `fnm env` prepends its multishell bin dir to PATH, so the *first*
+  # fnm_multishells/.../bin we encounter is the newest.
+  local IFS=:
+  # shellcheck disable=SC2206
+  local -a parts=($PATH)
+  local -A seen=()
+  local -a out=()
+  local fnm_keep=""
+  local localbin="$HOME/.local/bin"
+  local localbin_idx=-1
+
+  local p norm
+  for p in "${parts[@]}"; do
+    [[ -z "$p" ]] && continue
+    norm="${p%/}"
+
+    if [[ "$norm" =~ ^/run/user/[0-9]+/fnm_multishells/[^/]+/bin$ ]]; then
+      if [[ -z "$fnm_keep" ]]; then
+        fnm_keep="$norm"
+      fi
+      continue
+    fi
+
+    if [[ -n "${seen[$norm]+x}" ]]; then
+      continue
+    fi
+
+    seen[$norm]=1
+    out+=("$norm")
+    if [[ "$norm" == "$localbin" ]]; then
+      localbin_idx=$((${#out[@]} - 1))
+    fi
+  done
+
+  if [[ -n "$fnm_keep" ]] && [[ -z "${seen[$fnm_keep]+x}" ]]; then
+    if [[ "$localbin_idx" -ge 0 ]]; then
+      out=("${out[@]:0:$((localbin_idx + 1))}" "$fnm_keep" "${out[@]:$((localbin_idx + 1))}")
+    else
+      out=("$fnm_keep" "${out[@]}")
+    fi
+  fi
+
+  PATH="$(IFS=:; echo "${out[*]}")"
+  export PATH
+}
+
+ensure_bashrc_path_cleanup() {
+  # Keeps PATH tidy in interactive shells (and when setup sources ~/.bashrc repeatedly).
+  local bashrc="$HOME/.bashrc"
+  [[ -f "$bashrc" ]] || return 0
+
+  local start="# >>> setup-path-cleanup >>>"
+  local end="# <<< setup-path-cleanup <<<"
+  if grep -Fq "$start" "$bashrc" 2>/dev/null; then
+    return 0
+  fi
+
+  {
+    echo
+    echo "$start"
+    cat <<'EOF'
+__setup_path_cleanup() {
+  local IFS=:
+  # shellcheck disable=SC2206
+  local -a parts=($PATH)
+  local -A seen=()
+  local -a out=()
+  # `fnm env` prepends its multishell bin dir to PATH, so the first match is newest.
+  local fnm_keep=""
+  local localbin="$HOME/.local/bin"
+  local localbin_idx=-1
+
+  local p norm
+  for p in "${parts[@]}"; do
+    [[ -z "$p" ]] && continue
+    norm="${p%/}"
+
+    if [[ "$norm" =~ ^/run/user/[0-9]+/fnm_multishells/[^/]+/bin$ ]]; then
+      if [[ -z "$fnm_keep" ]]; then
+        fnm_keep="$norm"
+      fi
+      continue
+    fi
+
+    if [[ -n "${seen[$norm]+x}" ]]; then
+      continue
+    fi
+
+    seen[$norm]=1
+    out+=("$norm")
+    if [[ "$norm" == "$localbin" ]]; then
+      localbin_idx=$((${#out[@]} - 1))
+    fi
+  done
+
+  if [[ -n "$fnm_keep" ]] && [[ -z "${seen[$fnm_keep]+x}" ]]; then
+    if [[ "$localbin_idx" -ge 0 ]]; then
+      out=("${out[@]:0:$((localbin_idx + 1))}" "$fnm_keep" "${out[@]:$((localbin_idx + 1))}")
+    else
+      out=("$fnm_keep" "${out[@]}")
+    fi
+  fi
+
+  (IFS=:; echo "${out[*]}")
+}
+PATH="$(__setup_path_cleanup)"
+unset -f __setup_path_cleanup
+EOF
+    echo "$end"
+  } >>"$bashrc"
+}
+
 ensure_common_prereqs() {
   # Keep this list small and universal: tools used by many setup steps.
   local pkgs=(
@@ -78,10 +192,12 @@ refresh_bash_env() {
     source "$HOME/.bashrc"
     set -u
   fi
+  cleanup_path
   hash -r
 }
 
 ensure_common_prereqs
+ensure_bashrc_path_cleanup
 refresh_bash_env
 
 run_step() {
@@ -116,20 +232,23 @@ run_step "$SCRIPT_DIR/setup-docker-rootless.sh"
 if [[ -t 0 ]]; then
   read -r -p "Do you want to set up Tailscale? [y/N] " do_ts
   case "${do_ts,,}" in
-    y|yes)
-      run_step "$SCRIPT_DIR/setup-tailscale.sh"
-      read -r -p "Do you want to set up a firewall (ufw)? [y/N] " do_fw
-      case "${do_fw,,}" in
-        y|yes) run_step "$SCRIPT_DIR/setup-firewall.sh" ;;
-        *) log "skipping firewall setup" ;;
-      esac
-      ;;
-    *)
-      log "skipping tailscale"
-      ;;
+    y|yes) run_step "$SCRIPT_DIR/setup-tailscale.sh" ;;
+    *) log "skipping tailscale" ;;
+  esac
+
+  read -r -p "Do you want to set up a firewall (ufw)? [y/N] " do_fw
+  case "${do_fw,,}" in
+    y|yes) run_step "$SCRIPT_DIR/setup-firewall.sh" ;;
+    *) log "skipping firewall setup" ;;
+  esac
+
+  read -r -p "Do you want to clone and set up browserctrl (metlo-labs/browserctrl)? [y/N] " do_bc
+  case "${do_bc,,}" in
+    y|yes) run_step "$SCRIPT_DIR/setup-browserctrl.sh" ;;
+    *) log "skipping browserctrl setup" ;;
   esac
 else
-  log "stdin is not a TTY; skipping interactive tailscale/firewall steps."
+  log "stdin is not a TTY; skipping interactive tailscale/firewall/browserctrl steps."
 fi
 
 log "done"
